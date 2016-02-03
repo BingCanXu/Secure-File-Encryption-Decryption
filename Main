@@ -1,0 +1,557 @@
+#include <cstdio>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <cstdlib>
+#include <time.h>
+#include <sstream>
+#include "osrng.h"
+#include "cryptlib.h"
+#include "hex.h"
+#include "filters.h"
+#include "des.h"
+#include "modes.h"
+#include "secblock.h"
+#include "aes.h"
+#include "sha.h"
+#include "base32.h"
+#include "hmac.h"
+#include "md5.h"
+using namespace std;
+
+void login();
+void encryptfile(string pass) {
+
+	// Gets the name of the file
+	string filename;
+	cout << "Please enter the name of the file to encrypt." << endl;
+	getline( cin, filename);
+
+	// Generate 2 random key and 3 random IV
+	CryptoPP::AutoSeededRandomPool rprg;
+
+	CryptoPP::SecByteBlock filekey(0x00, CryptoPP::AES::DEFAULT_KEYLENGTH);
+	rprg.GenerateBlock(filekey, filekey.size());
+
+
+	byte fileiv[CryptoPP::AES::BLOCKSIZE];
+	rprg.GenerateBlock(fileiv, CryptoPP::AES::BLOCKSIZE);
+
+	byte file_nameiv[CryptoPP::AES::BLOCKSIZE];
+	rprg.GenerateBlock(file_nameiv, CryptoPP::AES::BLOCKSIZE);
+
+	byte file_iv[CryptoPP::AES::BLOCKSIZE];
+	rprg.GenerateBlock(file_iv, CryptoPP::AES::BLOCKSIZE);
+
+	// Change all the random key and iv from block to string
+	string sfile_key;
+	CryptoPP::HexEncoder hexfk(new CryptoPP::StringSink(sfile_key));
+	hexfk.Put(filekey, filekey.size());
+	hexfk.MessageEnd();
+
+	string sfileiv;
+	CryptoPP::HexEncoder hexfiv(new CryptoPP::StringSink(sfileiv));
+	hexfiv.Put(fileiv, 16);
+	hexfiv.MessageEnd();
+
+	string sfile_nameiv;
+	CryptoPP::HexEncoder hexfn(new CryptoPP::StringSink(sfile_nameiv));
+	hexfn.Put(file_nameiv, 16);
+	hexfn.MessageEnd();
+
+	string sfile_iv;
+	CryptoPP::HexEncoder hexf_iv(new CryptoPP::StringSink(sfile_iv));
+	hexf_iv.Put(file_iv, 16);
+	hexf_iv.MessageEnd();
+
+	//Make a copy of the filename
+	string tempfile_name = filename;
+
+	// Encrypt the filename with AES cipher in CFB mode
+	CryptoPP::CFB_Mode<CryptoPP::AES>::Encryption filenameencrypt((byte*)sfile_key.data(), 32, (byte*)sfile_nameiv.data());
+	filenameencrypt.ProcessData((byte*)tempfile_name.data(), (byte*)tempfile_name.data(), tempfile_name.size());
+
+	// Convert the encrypted filename from block into strings
+	string s_filename;
+	CryptoPP::HexEncoder hex4(new CryptoPP::StringSink(s_filename));
+	hex4.Put((byte*)tempfile_name.data(), tempfile_name.size());
+	hex4.MessageEnd();
+
+	// Create an empty file with encrypted filename as the name of the file
+	ofstream encfile;
+	encfile.open(s_filename + ".txt");
+
+	// Open the entered file and read the filestream into a stringstream then convert it to a string
+	ifstream ogfile;
+	string result;
+	ogfile.open(filename + ".txt");
+	ogfile.seekg(0, ios::end);
+	result.resize(ogfile.tellg());
+	ogfile.seekg(0, ios::beg);
+	ogfile.read(&result[0],result.size());
+	ogfile.close();
+	
+	// Encrypt the content of the file with aes cipher in CFB mode
+	CryptoPP::CFB_Mode<CryptoPP::AES>::Encryption fileencrypt((byte*)sfile_key.data(), 32, (byte*)sfile_iv.data());
+	fileencrypt.ProcessData((byte*)result.data(), (byte*)result.data(), result.size());
+	
+	// Create a string as the concatenation the filename and the content of the file 
+	string fsaves = s_filename + result;
+	string tagg, encoded;
+
+	// Create Tag
+	try
+	{
+		CryptoPP::HMAC<CryptoPP::SHA256> ftag((byte*)sfile_key.data(), 32);
+		CryptoPP::StringSource ss2(fsaves, true,
+			new CryptoPP::HashFilter(ftag,
+				new CryptoPP::StringSink(tagg)
+				)
+
+			);
+	}
+
+	catch (const CryptoPP::Exception& e)
+	{
+
+		cerr << e.what() << endl;
+		exit(1);
+	}
+
+	// Convert the tag to a string
+	encoded.clear();
+	CryptoPP::StringSource ss3(tagg, true,
+		new CryptoPP::HexEncoder(
+			new CryptoPP::StringSink(encoded)
+			)
+		);
+
+	//Convert the encrypted content into string
+	string result_string;
+	CryptoPP::HexEncoder rs(new CryptoPP::StringSink(result_string));
+	rs.Put((byte*)result.data(), result.size());
+	rs.MessageEnd();
+
+	// Put the encrypted file into the opened encrypted filename
+	encfile << result_string;
+	encfile.close();
+
+	CryptoPP::MD5 hash;
+	byte digest[CryptoPP::MD5::DIGESTSIZE];
+	hash.CalculateDigest(digest, (byte*)pass.c_str(), pass.length());
+
+	// Convert to the password to string 
+	CryptoPP::HexEncoder passenc;
+	string md_pass;
+	passenc.Attach(new CryptoPP::StringSink(md_pass));
+	passenc.Put(digest, sizeof(digest));
+	passenc.MessageEnd();
+
+	// Encrypt the file key with aes cipher in CFB mode
+	CryptoPP::CFB_Mode<CryptoPP::AES>::Encryption keyencrypt((byte*)md_pass.data(), 32, (byte*)sfileiv.data());
+	keyencrypt.ProcessData((byte*)sfile_key.data(), (byte*)sfile_key.data(), sfile_key.size());
+	
+	// Convert the encrypted key from block into string 
+	string enc_key;
+	CryptoPP::HexEncoder hexek(new CryptoPP::StringSink(enc_key));
+	hexek.Put((byte*)sfile_key.data(), sfile_key.size());
+	hexek.MessageEnd();
+
+	// Create a file containing string of encrypted tag, string of encrypted key, string of the encrypted iv and string of encrypted random key
+	ofstream encfileinfo;
+	encfileinfo.open(s_filename + "info.txt");
+	encfileinfo << encoded + '\n';
+	encfileinfo << enc_key + '\n';
+	encfileinfo << sfileiv + '\n';
+	encfileinfo << sfile_nameiv + '\n';
+	encfileinfo << sfile_iv + '\n';
+	cout << "Your encrypted file: " << s_filename + ".txt" << endl;
+
+ }
+
+ void decryptfile(string pass) {
+
+	 // Get the name of the encrypted file
+	 string filename;
+	 cout << "Please enter the name of the file to decrypt." << endl;
+	 getline( cin, filename);
+
+	 // Open the info text and get the string of encrypted tag, string of encrypted key, string of the encrypted iv and string of encrypted random key
+	 ifstream infofile;
+	 infofile.open(filename + "info.txt");
+	 string tag;
+	 string taginfo;
+	 string keyinfo;
+	 string sfileiv;
+	 string sfile_nameiv;
+	 string sfile_iv;
+
+	 getline(infofile, taginfo);
+	 getline(infofile, keyinfo);
+	 getline(infofile, sfileiv);
+	 getline(infofile, sfile_nameiv);
+	 getline(infofile, sfile_iv);
+
+	 // Convert the string of encrypted key back into block
+	 string dec_key;
+	 CryptoPP::HexDecoder hexdk(new CryptoPP::StringSink(dec_key));
+	 hexdk.Put((byte*)keyinfo.data(), keyinfo.size());
+	 hexdk.MessageEnd();
+	 CryptoPP::MD5 hash;
+	 byte digest[CryptoPP::MD5::DIGESTSIZE];
+	 hash.CalculateDigest(digest, (byte*)pass.c_str(), pass.length());
+
+	 // Convert to the password to string 
+	 CryptoPP::HexEncoder passenc;
+	 string md_pass;
+	 passenc.Attach(new CryptoPP::StringSink(md_pass));
+	 passenc.Put(digest, sizeof(digest));
+	 passenc.MessageEnd();
+
+	 // Convert the block of encrypted key back into the original key
+	 CryptoPP::CFB_Mode<CryptoPP::AES>::Decryption keydecrypt((byte*)md_pass.data(), 32, (byte*)sfileiv.data());
+	 keydecrypt.ProcessData((byte*)dec_key.data(), (byte*)dec_key.data(), dec_key.size());
+
+	 // Convert the string of encrypted filename back into block
+	 string dec_filename;
+	 CryptoPP::HexDecoder hexfn(new CryptoPP::StringSink(dec_filename));
+	 hexfn.Put((byte*)filename.data(), filename.size());
+	 hexfn.MessageEnd();
+
+	 //Convert the block of encrypted filename back into original filename
+	 CryptoPP::CFB_Mode<CryptoPP::AES>::Decryption filenamedecrypt((byte*)dec_key.data(), 32, (byte*)sfile_nameiv.data());
+	 filenamedecrypt.ProcessData((byte*)dec_filename.data(), (byte*)dec_filename.data(), dec_filename.size());
+
+	 // Read the encrypted file and put the content into a string
+	 ifstream decfile;
+	 decfile.open(filename + ".txt");
+	 stringstream buffer;
+	 buffer << decfile.rdbuf();
+	 string content(buffer.str());
+	
+	 // Convert the string of encrypted content back into block
+	 string content_string;
+	 CryptoPP::HexDecoder cs(new CryptoPP::StringSink(content_string));
+	 cs.Put((byte*)content.data(), content.size());
+	 cs.MessageEnd();
+
+	 // Create a string as the concatenation the filename and the content of the file 
+	 string fsaves = filename + content_string;
+
+	 // validate the tag
+	 CryptoPP::StringSource ss3(taginfo, true,
+		 new CryptoPP::HexDecoder(
+			 new CryptoPP::StringSink(tag)
+			 )
+		 );
+
+	 bool altered = false;
+	 try
+	 {
+		 CryptoPP::HMAC< CryptoPP::SHA256 > hmac((byte*)dec_key.data(), 32);
+		 const int flags = CryptoPP::HashVerificationFilter::THROW_EXCEPTION | CryptoPP::HashVerificationFilter::HASH_AT_END;
+
+		 CryptoPP::StringSource(fsaves + tag, true,
+			 new CryptoPP::HashVerificationFilter(hmac, NULL, flags)
+			 ); // StringSource
+
+	 }
+	 catch (const CryptoPP::Exception& e)
+	 {
+		 cerr << e.what() << endl;
+		 altered = true;
+	 }
+
+	 // Decrypt the content of the file
+	 CryptoPP::CFB_Mode<CryptoPP::AES>::Decryption filedecrypt((byte*)dec_key.data(), 32, (byte*)sfile_iv.data());
+	 filedecrypt.ProcessData((byte*)content_string.data(), (byte*)content_string.data(), content_string.size());
+	
+	 // Output decrypted file if not corrupted
+	 string fn1 = filename + ".txt";
+	 string fn2 = filename + "info.txt";
+	 if (!altered) {
+		cout << "Your decrypted file: " << dec_filename + ".txt" << endl;
+		ofstream decrypted;
+		decrypted.open(dec_filename + ".txt");
+		decrypted << content_string;	 
+		decfile.close();
+		infofile.close();
+		remove(fn1.c_str());
+		remove(fn2.c_str());
+	 }
+	 else {
+		cout << "Your file has been tampered with" << endl;
+	 }
+ }
+
+void createAccount() {
+	string username;
+	string password;
+	ifstream myfile;
+	string line;
+	bool used = true;
+
+	// Checks to see if the username already exists
+	while (used) {
+		cout << "What User Name do you want?" << endl;
+		getline ( cin, username);
+		used = false;
+		myfile.open("username.txt");
+		while (myfile >> line) {
+			if (line == username) {
+				cout << "Sorry Name already taken. =(" << endl;
+				used = true;
+				break;
+			}
+		}
+		myfile.close();
+
+	}
+	// Add the username to the file
+	ofstream writefile;
+	writefile.open("username.txt", ios_base::app);
+	writefile << "\n" + username;
+	writefile.close();
+
+	// Get the password
+	cout << "What Password do you want?" << endl;
+	getline (cin, password);
+
+	// Generates a random salt for the password
+	CryptoPP::AutoSeededRandomPool prng;
+	CryptoPP::SecByteBlock salt(2);
+	prng.GenerateBlock(salt, salt.size());
+
+	// Convert the salt from block to string
+	string salt_string;
+	CryptoPP::HexEncoder hex(new CryptoPP::StringSink(salt_string));
+	hex.Put(salt, salt.size());
+	hex.MessageEnd();
+
+	// Add the salt to the password
+	string salt_pass = salt_string + password;
+
+	// Hash using Sha512 hash
+	CryptoPP::SHA512 hash;
+	byte digest[CryptoPP::SHA512::DIGESTSIZE];
+	hash.CalculateDigest(digest, (byte*)salt_pass.c_str(), salt_pass.length());
+
+	// Convert to the password to string 
+	CryptoPP::HexEncoder encoder;
+	string sh_salt_pass;
+	encoder.Attach(new CryptoPP::StringSink(sh_salt_pass));
+	encoder.Put(digest, sizeof(digest));
+	encoder.MessageEnd();
+
+	// Generate two random keys
+	CryptoPP::SecByteBlock key1(0x00, CryptoPP::AES::MAX_KEYLENGTH);
+	prng.GenerateBlock(key1, key1.size());
+	CryptoPP::SecByteBlock key2(0x00, CryptoPP::AES::MAX_KEYLENGTH);
+	prng.GenerateBlock(key2, key2.size());
+
+	// Generate a random IV
+	byte iv[CryptoPP::AES::BLOCKSIZE];
+	prng.GenerateBlock(iv, CryptoPP::AES::BLOCKSIZE);
+
+	// Convert the keys and IV from block to string
+	string key1_string;
+	CryptoPP::HexEncoder hex1(new CryptoPP::StringSink(key1_string));
+	hex1.Put(key1, key1.size());
+	hex1.MessageEnd();
+	string key2_string;
+	CryptoPP::HexEncoder hex2(new CryptoPP::StringSink(key2_string));
+	hex2.Put(key2, key2.size());
+	hex2.MessageEnd();
+	string iv_string;
+	CryptoPP::HexEncoder hex3(new CryptoPP::StringSink(iv_string));
+	hex3.Put(iv, CryptoPP::AES::BLOCKSIZE);
+	hex3.MessageEnd();
+
+	// Encrypt the Sha51 salted pass
+	CryptoPP::CFB_Mode<CryptoPP::AES>::Encryption cfbEncryption((byte*)key1_string.data(), key1.size(), (byte*)iv_string.data());
+	cfbEncryption.ProcessData((byte*)sh_salt_pass.data(), (byte*)sh_salt_pass.data(), sh_salt_pass.size());
+
+	string sh_salt_pass_string;
+	CryptoPP::HexEncoder hex4(new CryptoPP::StringSink(sh_salt_pass_string));
+	hex4.Put((byte*)sh_salt_pass.data(), CryptoPP::AES::BLOCKSIZE);
+	hex4.MessageEnd();
+
+	ofstream insertacc;
+	insertacc.open(username + (".txt"));
+	insertacc << key1_string + '\n';
+	insertacc << key2_string + '\n';
+	insertacc << iv_string + '\n';
+	insertacc << salt_string + '\n';
+	insertacc << sh_salt_pass_string + '\n';
+	insertacc.close();
+	login();
+}
+
+void login() {
+	bool valid_pass = false;
+	string username;
+	string pass;
+	bool exists = false;
+	bool valid_account = false;
+	string names;
+	string create_name;
+	while (!valid_account) {
+		cout << "Enter your username." << endl;
+		getline(cin, username);
+		ifstream cfile;
+		cfile.open("username.txt");
+		while (cfile >> names) {
+			if (names == username) {
+				exists = true;
+				break;
+			}
+		}
+		cfile.close();
+		ifstream validate;
+		string encpass;
+		string key1;
+		string key2;
+		string iv;
+		string salt;
+		string line;
+		validate.open(username + (".txt"));
+		getline(validate, key1);
+		getline(validate, key2);
+		getline(validate, iv);
+		getline(validate, salt);
+		getline(validate, encpass);
+		cout << "Enter your password." << endl;
+		getline(cin, pass);
+		string salt_pass = salt + pass;
+		valid_pass = true;
+
+		// Calculate time in seconds 
+		time_t seconds;
+		seconds = time(NULL);
+
+		// Convert to int
+		int timein;
+		timein = int(seconds);
+
+		// Convert to string
+		string Result;
+		ostringstream convert;
+		convert << timein;
+		Result = convert.str();
+		// Add time stamp to encrypted pass
+		string time_encpass = encpass + Result;
+		string mac, encoded;
+		// Create Tag
+		try
+		{
+			CryptoPP::HMAC<CryptoPP::SHA256> hmac((byte*)key2.data(), 32);
+			CryptoPP::StringSource ss2(time_encpass, true,
+				new CryptoPP::HashFilter(hmac,
+					new CryptoPP::StringSink(mac)
+					)
+				);
+		}
+		catch (const CryptoPP::Exception& e)
+		{
+			cerr << e.what() << endl;
+			exit(1);
+		}
+
+		// Hash using Sha512 hash
+		CryptoPP::SHA512 hash;
+		byte digest[CryptoPP::SHA512::DIGESTSIZE];
+		hash.CalculateDigest(digest, (byte*)salt_pass.c_str(), salt_pass.length());
+
+		// Convert to the password to string 
+		CryptoPP::HexEncoder encoder;
+		string sh_salt_pass;
+		encoder.Attach(new CryptoPP::StringSink(sh_salt_pass));
+		encoder.Put(digest, sizeof(digest));
+		encoder.MessageEnd();
+		CryptoPP::CFB_Mode<CryptoPP::AES>::Encryption cfbEncryption((byte*)key1.data(), 32, (byte*)iv.data());
+		cfbEncryption.ProcessData((byte*)sh_salt_pass.data(), (byte*)sh_salt_pass.data(), sh_salt_pass.size());
+		string sh_salt_pass_string;
+		CryptoPP::HexEncoder hex4(new CryptoPP::StringSink(sh_salt_pass_string));
+		hex4.Put((byte*)sh_salt_pass.data(), CryptoPP::AES::BLOCKSIZE);
+		hex4.MessageEnd();
+		if (encpass != sh_salt_pass_string){
+			valid_pass = false;
+		}
+
+		try
+		{
+			CryptoPP::HMAC< CryptoPP::SHA256 > hmac((byte*)key2.data(), 32);
+			const int flags = CryptoPP::HashVerificationFilter::THROW_EXCEPTION | CryptoPP::HashVerificationFilter::HASH_AT_END;
+
+			CryptoPP::StringSource(time_encpass + mac, true,
+				new CryptoPP::HashVerificationFilter(hmac, NULL, flags)
+				);
+
+		}
+		catch (const CryptoPP::Exception& e)
+		{
+			cerr << e.what() << endl;
+			valid_pass = false;
+		}
+
+		// Calculate time in seconds 
+		time_t seconds2;
+		seconds2 = time(NULL);
+		// Convert to int
+		int timee2;
+		timee2 = int(seconds);
+		if (timee2 - timein > 5) {
+			valid_pass = false;
+		}
+		if (exists && valid_pass) {
+			valid_account = true;
+		}
+
+
+		if (!valid_account) {
+			cout << "Your Account does not exist or you have entered an incorrect password. Do you want to create a new account?" << endl;
+			cout << "Enter yes to create a new account or no to retry." << endl;
+			getline(cin, create_name);
+			if (create_name == "yes") {
+				createAccount();
+			}
+		}
+	}
+	cout << "You have sucessfully logged in! " << endl;
+	while (true) {
+		string todo;
+		cout << "What do you want to do?" << endl;
+		cout << "Enter 1 if you want to encrypt a file" << endl;
+		cout << "Enter 2 if you want to decrypt a file" << endl;
+		getline(cin, todo);
+		if (todo == "1") {
+			encryptfile(pass);
+		}
+		else if(todo == "2") {
+			decryptfile(pass);
+		}
+		else {
+			cout << "Please enter a valid choice!" << endl;
+		}
+	}
+}
+
+int main(int argc, char* argv[]) {
+	ofstream user_file;
+	user_file.open("username.txt", ios_base::app);
+	string choice;
+	while (choice != "1" && choice != "2") {
+		cout << "1. Create an account" << endl;
+		cout << "2. Login" << endl;
+		cout << "Enter 1 or 2 to Continue." << endl;
+		getline(cin, choice);
+	}
+	if (choice == "1") {
+		createAccount();
+	}
+	else {
+		login();
+	}
+	
+	system("pause");
+}
